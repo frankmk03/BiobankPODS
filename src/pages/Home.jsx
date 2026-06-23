@@ -22,7 +22,7 @@ function Home() {
       await login({
         oidcIssuer: issuer,
         redirectUrl: window.location.origin + '/',
-        clientId: window.location.origin + '/client-id.json',
+        clientName: 'BiobankPODS',
       })
     } catch {
       setError('Could not connect to that server. Check the URL and try again.')
