@@ -6,12 +6,17 @@ import {
   getContainedResourceUrlAll,
   getThing,
   getUrl,
+  addUrl,
+  setThing,
+  saveSolidDatasetAt,
+  createContainerAt,
   getResourceInfoWithAcl,
   getResourceAcl,
   hasResourceAcl,
   hasFallbackAcl,
   createAclFromFallbackAcl,
   setAgentResourceAccess,
+  setPublicResourceAccess,
   saveAclFor,
 } from '@inrupt/solid-client'
 import { SessionContext } from '../SessionContext'
@@ -20,6 +25,7 @@ const STORAGE_PREDICATES = [
   'http://www.w3.org/ns/pim/space#storage',
   'http://www.w3.org/ns/solid/terms#storage',
 ]
+const INBOX_PREDICATE = 'http://www.w3.org/ns/ldp#inbox'
 
 function deriveStorageUrl(webId) {
   const url = new URL(webId)
@@ -36,69 +42,119 @@ function itemName(url) {
   return clean.split('/').pop()
 }
 
-async function grantReadAccess(resourceUrl, recipientWebId, sessionFetch) {
-  const resourceWithAcl = await getResourceInfoWithAcl(resourceUrl, { fetch: sessionFetch })
+async function ensureInbox(storageUrl, webId, sessionFetch) {
+  const inboxUrl = storageUrl + 'inbox/'
 
+  const check = await sessionFetch(inboxUrl, { method: 'HEAD' })
+  if (check.ok) return
+
+  // Create the inbox container
+  await createContainerAt(inboxUrl, { fetch: sessionFetch })
+
+  // Set ACL: owner gets full control, public gets append-only
+  const inboxWithAcl = await getResourceInfoWithAcl(inboxUrl, { fetch: sessionFetch })
   let acl
-  if (hasResourceAcl(resourceWithAcl)) {
-    acl = getResourceAcl(resourceWithAcl)
-  } else if (hasFallbackAcl(resourceWithAcl)) {
-    acl = createAclFromFallbackAcl(resourceWithAcl)
+  if (hasResourceAcl(inboxWithAcl)) {
+    acl = getResourceAcl(inboxWithAcl)
+  } else if (hasFallbackAcl(inboxWithAcl)) {
+    acl = createAclFromFallbackAcl(inboxWithAcl)
   } else {
-    throw new Error(`No ACL accessible for ${itemName(resourceUrl)}`)
+    return
   }
 
-  const updated = setAgentResourceAccess(acl, recipientWebId, {
-    read: true,
-    append: false,
-    write: false,
-    control: false,
+  acl = setAgentResourceAccess(acl, webId, {
+    read: true, append: true, write: true, control: true,
+  })
+  acl = setPublicResourceAccess(acl, {
+    read: false, append: true, write: false, control: false,
+  })
+  await saveAclFor(inboxWithAcl, acl, { fetch: sessionFetch })
+
+  // Link the inbox in the WebID profile so others can discover it
+  const profileUrl = webId.split('#')[0]
+  const profileDataset = await getSolidDataset(profileUrl, { fetch: sessionFetch })
+  const profileThing = getThing(profileDataset, webId)
+  if (!getUrl(profileThing, INBOX_PREDICATE)) {
+    const updated = setThing(profileDataset, addUrl(profileThing, INBOX_PREDICATE, inboxUrl))
+    await saveSolidDatasetAt(profileUrl, updated, { fetch: sessionFetch })
+  }
+}
+
+async function copyToInbox(resourceUrl, recipientWebId, sessionFetch) {
+  if (resourceUrl.endsWith('/')) {
+    throw new Error(`"${itemName(resourceUrl)}" is a folder — only files can be copied for now.`)
+  }
+
+  const profile = await getSolidDataset(recipientWebId, { fetch: sessionFetch })
+  const thing = getThing(profile, recipientWebId)
+  const inboxUrl = getUrl(thing, INBOX_PREDICATE)
+  if (!inboxUrl) throw new Error("Could not find the recipient's inbox.")
+
+  const response = await sessionFetch(resourceUrl)
+  if (!response.ok) throw new Error(`Could not read "${itemName(resourceUrl)}".`)
+
+  const content = await response.arrayBuffer()
+  const contentType = response.headers.get('content-type') || 'application/octet-stream'
+
+  const post = await sessionFetch(inboxUrl, {
+    method: 'POST',
+    headers: { 'content-type': contentType, 'slug': itemName(resourceUrl) },
+    body: content,
   })
 
-  await saveAclFor(resourceWithAcl, updated, { fetch: sessionFetch })
+  if (!post.ok) throw new Error(`Could not deliver to inbox (${post.status}).`)
 }
 
 function ShareModal({ selected, onClose, sessionFetch }) {
   const [recipientWebId, setRecipientWebId] = useState('')
-  const [sharing, setSharing] = useState(false)
-  const [error, setError] = useState('')
+  const [sending, setSending] = useState(false)
+  const [errors, setErrors] = useState([])
   const [done, setDone] = useState(false)
 
   async function handleSubmit(e) {
     e.preventDefault()
-    setError('')
-    setSharing(true)
+    setErrors([])
+    setSending(true)
 
     const webId = recipientWebId.trim()
     if (!webId) {
-      setError('Please enter a WebID.')
-      setSharing(false)
+      setErrors(['Please enter a WebID.'])
+      setSending(false)
       return
     }
 
-    try {
-      for (const url of selected) {
-        await grantReadAccess(url, webId, sessionFetch)
+    const errs = []
+    for (const url of selected) {
+      try {
+        await copyToInbox(url, webId, sessionFetch)
+      } catch (err) {
+        errs.push(err.message)
       }
+    }
+
+    setSending(false)
+    if (errs.length === 0) {
       setDone(true)
       setTimeout(onClose, 1500)
-    } catch (err) {
-      setError(err.message || 'Failed to share. Check the WebID and try again.')
-    } finally {
-      setSharing(false)
+    } else {
+      setErrors(errs)
     }
   }
+
+  const fileCount = [...selected].filter(u => !u.endsWith('/')).length
+  const folderCount = selected.size - fileCount
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-4">
       <div className="w-full max-w-md bg-lumon-surface border border-lumon-border rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-lumon-fg mb-1">Share items</h2>
+        <h2 className="text-lg font-semibold text-lumon-fg mb-1">Send copy</h2>
         <p className="text-sm text-lumon-subtle mb-5">
-          Granting read access to {selected.size} item{selected.size !== 1 ? 's' : ''}.
+          {fileCount} file{fileCount !== 1 ? 's' : ''} will be copied to the recipient's inbox.
+          {folderCount > 0 && ` (${folderCount} folder${folderCount !== 1 ? 's' : ''} will be skipped.)`}
         </p>
 
         {done ? (
-          <p className="text-sm text-lumon-accent">Shared successfully.</p>
+          <p className="text-sm text-lumon-accent">Sent successfully.</p>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
@@ -114,15 +170,21 @@ function ShareModal({ selected, onClose, sessionFetch }) {
               />
             </div>
 
-            {error && <p className="text-sm text-lumon-error">{error}</p>}
+            {errors.length > 0 && (
+              <ul className="space-y-1">
+                {errors.map((err, i) => (
+                  <li key={i} className="text-sm text-lumon-error">{err}</li>
+                ))}
+              </ul>
+            )}
 
             <div className="flex gap-3 pt-1">
               <button
                 type="submit"
-                disabled={sharing}
+                disabled={sending}
                 className="flex-1 rounded-lg bg-lumon-accent px-4 py-2.5 font-semibold text-lumon-bg hover:bg-lumon-accent-hover disabled:opacity-50 transition-colors"
               >
-                {sharing ? 'Sharing…' : 'Share'}
+                {sending ? 'Sending…' : 'Send copy'}
               </button>
               <button
                 type="button"
@@ -163,6 +225,9 @@ function FileBrowser() {
           if (storageUrl) break
         }
         if (!storageUrl) storageUrl = deriveStorageUrl(session.info.webId)
+
+        await ensureInbox(storageUrl, session.info.webId, session.fetch)
+
         setBreadcrumbs([{ url: storageUrl, name: 'My POD' }])
         setCurrentUrl(storageUrl)
       } catch (e) {
@@ -229,18 +294,20 @@ function FileBrowser() {
 
   if (!session.info.isLoggedIn) return <Navigate to="/" replace />
 
+  const selectedFiles = [...selected].filter(u => !u.endsWith('/'))
+
   return (
     <div className="min-h-screen bg-lumon-bg text-lumon-fg flex flex-col">
       <header className="border-b border-lumon-border px-6 py-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-lumon-fg">BiobankPODS</h1>
         <div className="flex items-center gap-4">
-          {selected.size > 0 && (
+          {selectedFiles.length > 0 && (
             <button
               onClick={() => setShareOpen(true)}
               className="flex items-center gap-2 rounded-lg bg-lumon-accent px-4 py-2 text-sm font-semibold text-lumon-bg hover:bg-lumon-accent-hover transition-colors"
             >
               <ShareIcon />
-              Share {selected.size} item{selected.size !== 1 ? 's' : ''}
+              Send copy ({selectedFiles.length})
             </button>
           )}
           <button
@@ -253,7 +320,6 @@ function FileBrowser() {
       </header>
 
       <main className="flex-1 px-6 py-6 max-w-3xl w-full mx-auto">
-        {/* Breadcrumbs */}
         <nav className="flex items-center gap-1 text-sm mb-6 flex-wrap">
           {breadcrumbs.map((crumb, i) => (
             <span key={crumb.url} className="flex items-center gap-1">
@@ -273,7 +339,7 @@ function FileBrowser() {
         </nav>
 
         {loading && <p className="text-lumon-subtle">Loading…</p>}
-        {error && <p className="text-lumon-muted">{error}</p>}
+        {error && <p className="text-lumon-error">{error}</p>}
 
         {!loading && !error && items.length === 0 && (
           <p className="text-lumon-subtle">This folder is empty.</p>
@@ -281,7 +347,6 @@ function FileBrowser() {
 
         {!loading && !error && items.length > 0 && (
           <ul className="divide-y divide-lumon-border rounded-lg border border-lumon-border overflow-hidden">
-            {/* Select all row */}
             <li className="flex items-center gap-3 px-4 py-2 bg-lumon-surface">
               <input
                 type="checkbox"
@@ -295,7 +360,10 @@ function FileBrowser() {
             </li>
 
             {items.map(item => (
-              <li key={item.url} className={`flex items-center gap-3 px-4 py-3 transition-colors ${selected.has(item.url) ? 'bg-lumon-surface' : 'hover:bg-lumon-surface/50'}`}>
+              <li
+                key={item.url}
+                className={`flex items-center gap-3 px-4 py-3 transition-colors ${selected.has(item.url) ? 'bg-lumon-surface' : 'hover:bg-lumon-surface/50'}`}
+              >
                 <input
                   type="checkbox"
                   checked={selected.has(item.url)}
