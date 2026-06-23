@@ -1,1 +1,13 @@
 @import "tailwindcss";
+
+@theme {
+  --color-lumon-bg: #16242d;
+  --color-lumon-surface: #1b2d40;
+  --color-lumon-border: #304860;
+  --color-lumon-muted: #4d86b0;
+  --color-lumon-fg: #d6e2ee;
+  --color-lumon-subtle: #6fa4c9;
+  --color-lumon-accent: #8bc9eb;
+  --color-lumon-accent-hover: #b4e4f6;
+  --color-lumon-error: #4d86b0;
+}
