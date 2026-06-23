@@ -1,9 +1,16 @@
-import { useState } from 'react'
+import { useContext, useState } from 'react'
+import { Navigate } from 'react-router'
 import { login } from '@inrupt/solid-client-authn-browser'
+import { SessionContext } from '../SessionContext'
 
 function Home() {
+  const { session } = useContext(SessionContext)
   const [serverUrl, setServerUrl] = useState('')
   const [error, setError] = useState('')
+
+  if (session.info.isLoggedIn) {
+    return <Navigate to="/dashboard" replace />
+  }
 
   async function handleLogin(e) {
     e.preventDefault()
