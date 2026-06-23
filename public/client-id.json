@@ -1,0 +1,11 @@
+{
+  "@context": ["https://www.w3.org/ns/solid/oidc-context.jsonld"],
+  "client_id": "http://localhost:5173/client-id.json",
+  "client_name": "BiobankPODS",
+  "redirect_uris": ["http://localhost:5173/"],
+  "grant_types": ["authorization_code"],
+  "response_types": ["code"],
+  "scope": "openid webid",
+  "token_endpoint_auth_method": "none",
+  "application_type": "web"
+}
